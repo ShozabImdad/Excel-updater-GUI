@@ -8,6 +8,7 @@ import os
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import winsound
+import win32com.client
 
 _sound_enabled = True
 
@@ -417,14 +418,9 @@ def process_column(col, total_columns, input_df):
         for idx, symbol in enumerate(matched_symbols, start=18):
             output_df.iloc[idx, col] = symbol
             
-        # Save the modified DataFrame to Excel
-        if os.path.exists(output_excel_file_path): #type: ignore
-            if is_file_open(output_excel_file_path):
-                os.system("taskkill /f /im excel.exe")
-                print("Excel file is closed.")
-
-        time.sleep(2)
-        output_df.to_excel(output_excel_file_path, index=False)
+        # Save the modified DataFrame to Excel using the new retry function
+        # instead of forcibly closing Excel
+        output_excel_file_path = save_excel_with_retry(output_df, output_excel_file_path)
         print(f"\nColumn {col-2} data saved successfully in {output_excel_file_path}")
 
         # Save the excluded symbols with reasons to a separate text file for each column
@@ -448,8 +444,76 @@ def process_column(col, total_columns, input_df):
             print("All columns processed for today ... waiting for next day.")
             schedule.clear()  # Clear the current schedule for the day
             output_excel_file_path = generate_output_file_path()  # Generate new file for next day
-            schedule_tasks()  
+            schedule_tasks()
 
+def save_excel_with_retry(df, file_path, max_retries=5, retry_delay=2):
+    """
+    Save DataFrame to Excel with retry logic and specific Excel file closing.
+    
+    Args:
+        df: DataFrame to save
+        file_path: Target file path
+        max_retries: Maximum number of retry attempts
+        retry_delay: Seconds to wait between retries
+    
+    Returns:
+        The actual file path where the data was saved
+    """
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            # Attempt to save the file
+            df.to_excel(file_path, index=False)
+            print(f"Successfully saved data to {file_path}")
+            return file_path
+            
+        except PermissionError:
+            # File is locked by another process
+            retry_count += 1
+            print(f"File {file_path} is currently in use. Attempt {retry_count}/{max_retries}")
+            
+            if retry_count == 2:  # Try to close specific Excel file on second attempt
+                try:
+                    # Get absolute path to the file
+                    abs_path = os.path.abspath(file_path)
+                    
+                    # Connect to Excel application
+                    excel = win32com.client.GetObject(Class="Excel.Application")
+                    
+                    # Loop through open workbooks
+                    for wb in excel.Workbooks:
+                        if wb.FullName.lower() == abs_path.lower():
+                            print(f"Found open workbook: {wb.Name} - Closing it")
+                            wb.Close(SaveChanges=False)
+                            print(f"Successfully closed the specific workbook")
+                            break
+                    
+                    # Don't quit Excel itself, just release the COM object
+                    excel = None
+                    
+                except Exception as e:
+                    print(f"Could not close specific Excel file: {e}")
+            
+            # Wait before retrying
+            print(f"Waiting {retry_delay} seconds before retry...")
+            time.sleep(retry_delay)
+        
+        except Exception as e:
+            print(f"Unexpected error saving file: {e}")
+            raise
+    
+    # If all retries fail, still try once more after a longer wait
+    print(f"All retries failed. Waiting 5 seconds for final attempt...")
+    time.sleep(5)
+    
+    try:
+        df.to_excel(file_path, index=False)
+        print(f"Successfully saved data to {file_path} on final attempt")
+        return file_path
+    except Exception as e:
+        print(f"Final attempt failed: {e}")
+        raise
 
 # Run the scheduler
 def run_scheduler(stop_event):

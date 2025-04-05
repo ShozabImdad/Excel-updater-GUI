@@ -3,3 +3,5 @@ requests
 schedule
 watchdog
 tk
+openpyxl
+pywin32
